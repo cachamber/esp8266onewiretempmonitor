@@ -1,9 +1,8 @@
 /*
+
 Chambeers temperature monitor
 
-TODO Enhance the documentation here
-
- */
+*/
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
@@ -16,6 +15,7 @@ TODO Enhance the documentation here
 MDNSResponder mdns;
 WiFiServer server(80);
 String st;
+String wifi_choice="<select name=\"ssid\">";
 
 // OneWire sensor
 #include <OneWire.h>
@@ -24,35 +24,45 @@ String st;
 #define TEMPERATURE_PRECISION 12
 #define MAX_DEVICES 10
 
+// EEPROM Layout end of possible configuration data
+// 0 SSID 32 PASS 96 DB Host 160 DB Name 224
+#define EEPROM_SSID_O 0
+#define EEPROM_SSID_S 32
+#define EEPROM_PASS_O 32
+#define EEPROM_PASS_S 64
+#define EEPROM_DBH_O 96
+#define EEPROM_DBH_S 64
+#define EEPROM_DBN_O 160
+#define EEPROM_DBN_S 64
+#define EEPROM_SIZE 224
+
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
 // Pass our oneWire reference to Dallas Temperature.
 DallasTemperature sensors(&oneWire);
 
-// InfluxDB setup
-// TODO update influxDBHost connection based on EEPROM setting
-const char influxDBHost[] = "1.2.3.4";
-Influxdb influx(influxDBHost);
+// InfluxDB parameters
+// TODO: Auth?
+String influxdbhost;
+String influxdbname;
 
+// How often to post to influx
 const unsigned long postRate = 60000;
 unsigned long lastPost = 0;
 
-// TODO use MAC to make a unique SSID
-const char* ssid = "TempLogger";
-
-// Database
-// TODO change DB name to EEPROM setting
-const char *influxDBname = "testing";
-
+// Identifier for configuration SSID and device in influx
 String postedID = "ccESP8266-";
 
+// Storage for OneWire device names and measurements
 DeviceAddress devices[MAX_DEVICES];
 double measurements[MAX_DEVICES];
 String names[MAX_DEVICES];
 
-// Number of devices
+// Detected number of devices - occurs at Power On/Reset only
+// TODO: endpoint to rescan the OneWire network
 int num_devices = 0;
 
+// Setup some base values
 void init_values()
 {
   for (int x=0; x<MAX_DEVICES; x++)
@@ -65,6 +75,7 @@ void init_values()
 // Convert double to string
 char *dtostrf(double val, signed char width, unsigned char prec, char *s);
 
+// Takes a OneWire device address and converts it to a printable HEX String
 String convertDeviceAddress(DeviceAddress da)
 {   
     String tempString = "";
@@ -77,6 +88,7 @@ String convertDeviceAddress(DeviceAddress da)
   return (tempString);
 }
 
+// Tell all OneWire devices to retrieve temperatures
 void GetTemps()
 {
 
@@ -88,15 +100,19 @@ void GetTemps()
  
 }
 
+// Post measurements to influx
 int postToinfluxDB()
 { 
+  Influxdb influx(influxdbhost.c_str());
+  
+  influx.setDb(influxdbname.c_str());
   bool post = false;
+  bool success = true;
   
   // Get our current temps
   GetTemps();
-  
-  // Add the four field/value pairs defined by our stream:
-
+ 
+  // Batch up measurements 
   for (int i=0; i < num_devices; i++)
   {    
       // Only send to influx valid sensors
@@ -122,66 +138,52 @@ int postToinfluxDB()
       }
   }
   if ( post )
-    influx.write();
-  // TODO - Really?  Just return success - get the status of the influx.write and return it...
-  return 1; // Return success
+    success = influx.write();
+
+  return (success); // Return success
 }
 
 // Start here
 void loop ( void ) {
   if ((lastPost + postRate <= millis()) || lastPost == 0)
   {
-    Serial.println(F("Posting to influx!"));
     if (postToinfluxDB())
     {
       lastPost = millis();
-      Serial.println(F("Post Suceeded!"));
     }
     else // If the post failed
     {
       delay(500); // Short delay, then try again
-      Serial.println(F("Post failed, will try again."));
+      Serial.println(F("influxDB Post failed, will try again."));
     }
   }
   delay(50);
 }
 
-// TODO - Make these a single generic function.  pass in an offset and size, return String
-String read_esid( void ) {
-  String esid;
-  for (int i=0; i<32; ++i)
+// Generic EEPROM String reader
+String read_eeprom(int offset, int stringlength) {
+  String tempstring;
+  for (int i=offset; i < (offset+stringlength); ++i)
   {
-    esid += char(EEPROM.read(i));
+    tempstring += char(EEPROM.read(i));
   }
-  return (esid);
+  return (tempstring);
 }
 
-String read_pass( void ) {
-  String pass;
-  for (int i=32; i<96; ++i)
-  {
-    pass += char(EEPROM.read(i));
-  }
-  return (pass);
+// URL request parser
+// TODO: handle not found parameters
+String get_parameter( String param, String request )
+{
+  param.concat('=');
+  int paramLength = param.length();
+  int paramStart = request.indexOf(param);
+  int paramStop = request.indexOf('&', paramStart);
+
+  String myValue = request.substring(paramStart+paramLength, paramStop);
+
+  return(myValue);
 }
 
-String read_dbhost( void ) {
-  String st;
-  for (int i=96; i<160; ++i)
-  {
-    st += char(EEPROM.read(i));
-  }
-  return (st);
-}
-
-String read_dbname( void ) {
-  String st;
-  for (int i=160; i < 224; ++i)
-  {
-    st += char(EEPROM.read(i));
-  }
-  return (st);
-}
 
 int testWifi(void) {
   int c = 0;
@@ -189,7 +191,6 @@ int testWifi(void) {
   while ( c < 20 ) {
     if (WiFi.status() == WL_CONNECTED) { return(20); } 
     delay(500);
-    // TODO - Not a fan of returning WiFi.status() prefer the ...
     Serial.print(WiFi.status());    
     c++;
   }
@@ -255,15 +256,24 @@ void setupAP(void) {
       st +=i + 1;
       st += ": ";
       st += WiFi.SSID(i);
+      // Add the found network to a input option selection 
+      wifi_choice +="<option value=\"";
+      wifi_choice += WiFi.SSID(i);
+      wifi_choice += "\">";
+      wifi_choice += WiFi.SSID(i);
+      wifi_choice += "</option>";
       st += " (";
       st += WiFi.RSSI(i);
       st += ")";
       st += (WiFi.encryptionType(i) == ENC_TYPE_NONE)?" ":"*";
       st += "</li>";
     }
+  wifi_choice += "<option value=\"Unlisted\">Unlisted</option>";
+  wifi_choice += "</select>";
   st += "</ul>";
   delay(100);
-  WiFi.softAP(ssid);
+  
+  WiFi.softAP(postedID);
   Serial.println("softap");
   Serial.println("");
   launchWeb(1);
@@ -308,32 +318,37 @@ int mdns1(int webtype)
   if ( webtype == 1 ) {
       if (req == "/")
       {
-        // TODO - Might be cool to be able to select an SSID from a list found via serial?
-        //      - Save the list then present it as a choice
         IPAddress ip = WiFi.softAPIP();
         String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 at ";
         s += ipStr;
         s += "<p>";
         s += st;
-        s += "<form method='get' action='a'><label>SSID: </label><input name='ssid' length=32><input name='pass' length=64>";
-        s += "<input name='dbhost' length=64><input name='dbname' length=64><input type='submit'></form>";
+        s += "<form method='get' action='a'>";
+        s += wifi_choice; 
+        s += "<p><label>Pass:</label><input name='pass' length=64><p>";
+        s += "<label>DB Host</label><input name='dbhost' length=64><p><label>DB Name</label><input name='dbname' length=64><input type='submit'></form>";
         s += "</html>\r\n\r\n";
         Serial.println("Sending 200");
       }
       else if ( req.startsWith("/a?ssid=") ) {
+        // Set parameters in EEPROM
         // /a?ssid=blahhhh&pass=poooo&dbhost=blah.com&dbname=blah
         Serial.println("clearing eeprom");
         for (int i = 0; i < 224; ++i) { EEPROM.write(i, 0); }
         String qsid; 
-        qsid = req.substring(8,req.indexOf('&'));
+        qsid = get_parameter("ssid",req);
         Serial.println(qsid);
         Serial.println("");
-        String qpass;
-        qpass = req.substring(req.lastIndexOf('=')+1);
+        String qpass = get_parameter("pass",req);
         Serial.println(qpass);
         Serial.println("");
-       
+        String qdbhost = get_parameter("dbhost",req);
+        Serial.println(qdbhost);
+        Serial.println("");
+        String qdbname = get_parameter("dbname",req);
+        Serial.println(qdbname);
+        Serial.println("");
         
         Serial.println("writing eeprom ssid:");
         for (int i = 0; i < qsid.length(); ++i)
@@ -349,11 +364,27 @@ int mdns1(int webtype)
             Serial.print("Wrote: ");
             Serial.println(qpass[i]); 
           }    
+        Serial.println("writing eeprom dbhost:"); 
+        for (int i = 0; i < qdbhost.length(); ++i)
+          {
+            EEPROM.write(96+i, qdbhost[i]);
+            Serial.print("Wrote: ");
+            Serial.println(qdbhost[i]); 
+          }    
+        Serial.println("writing eeprom dbname:"); 
+        for (int i = 0; i < qdbname.length(); ++i)
+          {
+            EEPROM.write(160+i, qdbname[i]);
+            Serial.print("Wrote: ");
+            Serial.println(qdbname[i]); 
+          }    
+          
         EEPROM.commit();
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 ";
         s += "Found ";
         s += req;
         s += "<p> saved to eeprom... reset to boot into new wifi</html>\r\n\r\n";
+        // TODO: Should add ESP.reset()? after a delay
       }
       else
       {
@@ -361,11 +392,12 @@ int mdns1(int webtype)
         Serial.println("Sending 404");
       }
   } 
+  // webtype != 1
   else
   {
+      // Status request - base url
       if (req == "/")
       {
-        // Status page goes here
         GetTemps();
         
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>";
@@ -378,7 +410,6 @@ int mdns1(int webtype)
         s += "</th></tr>";
         for (int i=0; i<MAX_DEVICES; i++)
         {
-          // TODO - Update to filter out NC connections
           s += "<tr><td>";
           s += names[i];
           s += "</td><td>";
@@ -395,12 +426,11 @@ int mdns1(int webtype)
         s += "</html>\r\n\r\n";
         Serial.println("Sending 200");  
         Serial.println("clearing eeprom");
-        for (int i = 0; i < 96; ++i) { EEPROM.write(i, 0); }
+        for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
         EEPROM.commit();
       }
       else if ( req.startsWith("/changedb") ) {
-
-      }
+        // TODO: change DB code here
       }
       else
       {
@@ -478,29 +508,37 @@ void setup ( void ) {
   }
   
   Serial.println(F("\n\nStarting Network..."));
-
+  // Set WiFi ID
+  uint8_t mac[WL_MAC_ADDR_LENGTH];
+  WiFi.macAddress(mac);
+  String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
+                 String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
+  macID.toUpperCase();
+  postedID = "ccESP8266-" + macID;
+  Serial.print("Setting PostedID to: ");
+  Serial.println(postedID);
   // Read SSID/Password from EEPROM
-  String esid=read_esid();
+  String esid=read_eeprom(EEPROM_SSID_O,EEPROM_SSID_S);
   Serial.print("SSID: ");
   Serial.println(esid); 
 
-  String epass=read_pass();
+  String epass=read_eeprom(EEPROM_PASS_O,EEPROM_PASS_S);
   Serial.print("PASS: ");
   Serial.println(epass);  
 
+  String influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
+  Serial.print("DB Host: ");
+  Serial.println(influxdbhost);
+
+  String influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
+  Serial.print("DB Name: ");
+  Serial.println(influxdbname);
+  
   if ( esid.length() > 1 ) 
   {
     // test esid 
       WiFi.begin(esid.c_str(), epass.c_str());
       if ( testWifi() == 20 ) { 
-           // Setup connection to influxDB
-          influx.setDb(influxDBname);
-          uint8_t mac[WL_MAC_ADDR_LENGTH];
-          WiFi.macAddress(mac);
-          String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
-                         String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
-          macID.toUpperCase();
-          postedID = "ccESP8266-" + macID;
           launchWeb(0);
           return;
       }
