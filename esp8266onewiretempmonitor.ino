@@ -25,7 +25,7 @@ String wifi_choice="<select name=\"ssid\">";
 #define MAX_DEVICES 10
 
 // EEPROM Layout end of possible configuration data
-// 0 SSID 32 PASS 96 DB Host 160 DB Name 224
+// 0 SSID 32 PASS 96 DB Host 160 DB Name 224 Set 240
 #define EEPROM_SSID_O 0
 #define EEPROM_SSID_S 32
 #define EEPROM_PASS_O 32
@@ -34,7 +34,12 @@ String wifi_choice="<select name=\"ssid\">";
 #define EEPROM_DBH_S 64
 #define EEPROM_DBN_O 160
 #define EEPROM_DBN_S 64
-#define EEPROM_SIZE 224
+#define EEPROM_SET_O 224
+#define EEPROM_SET_S 16
+#define EEPROM_SIZE 240
+
+// Quick way to tell if DB parameters have been set
+String isset;
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -104,8 +109,9 @@ void GetTemps()
 int postToinfluxDB()
 { 
   Influxdb influx(influxdbhost.c_str());
-  
+
   influx.setDb(influxdbname.c_str());
+
   bool post = false;
   bool success = true;
   
@@ -145,16 +151,18 @@ int postToinfluxDB()
 
 // Start here
 void loop ( void ) {
-  if ((lastPost + postRate <= millis()) || lastPost == 0)
-  {
-    if (postToinfluxDB())
+  if ( isset == "SET") {
+    if ((lastPost + postRate <= millis()) || lastPost == 0)
     {
-      lastPost = millis();
-    }
-    else // If the post failed
-    {
-      delay(500); // Short delay, then try again
-      Serial.println(F("influxDB Post failed, will try again."));
+      if (postToinfluxDB())
+      {
+        lastPost = millis();
+      }
+      else // If the post failed
+      {
+        delay(5000); // Short delay, then try again
+        Serial.println(F("influxDB Post failed, will try again."));
+      }
     }
   }
   delay(50);
@@ -168,6 +176,18 @@ String read_eeprom(int offset, int stringlength) {
     tempstring += char(EEPROM.read(i));
   }
   return (tempstring);
+}
+
+void write_eeprom(int offset, String savestring) {
+  // TODO: Convert this to use put
+  for (int i = 0; i < savestring.length(); ++i)
+  {
+     EEPROM.write(offset+i, savestring[i]);
+     // TODO: Add debug statement
+     Serial.print("Wrote: ");
+     Serial.print(savestring[i]); 
+     Serial.println();
+  }
 }
 
 // URL request parser
@@ -216,7 +236,7 @@ void launchWeb(int webtype) {
           int b = 20;
           int c = 0;
           while(b == 20) { 
-            loop();
+               loop();   
              b = mdns1(webtype);
            }
 }
@@ -329,13 +349,16 @@ int mdns1(int webtype)
         s += "<p><label>Pass:</label><input name='pass' length=64><p>";
         s += "<label>DB Host</label><input name='dbhost' length=64><p><label>DB Name</label><input name='dbname' length=64><input type='submit'></form>";
         s += "</html>\r\n\r\n";
+        // TODO: Add new fields:
+        // Checkbox - Start measurements on boot - enabled by default
+        // text - postrate - Allow changes to frequency of measurements
         Serial.println("Sending 200");
       }
       else if ( req.startsWith("/a?ssid=") ) {
         // Set parameters in EEPROM
         // /a?ssid=blahhhh&pass=poooo&dbhost=blah.com&dbname=blah
         Serial.println("clearing eeprom");
-        for (int i = 0; i < 224; ++i) { EEPROM.write(i, 0); }
+        for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
         String qsid; 
         qsid = get_parameter("ssid",req);
         Serial.println(qsid);
@@ -351,40 +374,25 @@ int mdns1(int webtype)
         Serial.println("");
         
         Serial.println("writing eeprom ssid:");
-        for (int i = 0; i < qsid.length(); ++i)
-          {
-            EEPROM.write(i, qsid[i]);
-            Serial.print("Wrote: ");
-            Serial.println(qsid[i]); 
-          }
-        Serial.println("writing eeprom pass:"); 
-        for (int i = 0; i < qpass.length(); ++i)
-          {
-            EEPROM.write(32+i, qpass[i]);
-            Serial.print("Wrote: ");
-            Serial.println(qpass[i]); 
-          }    
-        Serial.println("writing eeprom dbhost:"); 
-        for (int i = 0; i < qdbhost.length(); ++i)
-          {
-            EEPROM.write(96+i, qdbhost[i]);
-            Serial.print("Wrote: ");
-            Serial.println(qdbhost[i]); 
-          }    
-        Serial.println("writing eeprom dbname:"); 
-        for (int i = 0; i < qdbname.length(); ++i)
-          {
-            EEPROM.write(160+i, qdbname[i]);
-            Serial.print("Wrote: ");
-            Serial.println(qdbname[i]); 
-          }    
+        write_eeprom(EEPROM_SSID_O, qsid);
+        Serial.println("writing eeprom pass:");
+        write_eeprom(EEPROM_PASS_O, qpass);
+        Serial.println("writing eeprom dbhost:");
+        write_eeprom(EEPROM_DBH_O, qdbhost);
+        Serial.println("writing eeprom dbname:");
+        write_eeprom(EEPROM_DBN_O, qdbname);
+        Serial.println("writing eeprom isset:");
+        isset="SET";
+        write_eeprom(EEPROM_SET_O, isset);
+        isset="WAIT";
           
         EEPROM.commit();
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 ";
         s += "Found ";
         s += req;
-        s += "<p> saved to eeprom... reset to boot into new wifi</html>\r\n\r\n";
-        // TODO: Should add ESP.reset()? after a delay
+        s += "<p> saved to eeprom... reset will occur in 5 seconds to boot into new wifi</html>\r\n\r\n";
+        delay(5000);
+        ESP.reset();
       }
       else
       {
@@ -399,7 +407,8 @@ int mdns1(int webtype)
       if (req == "/")
       {
         GetTemps();
-        
+        // TODO: Add a button to pause/start measurements
+        //       Add links to clearconfig/configuredb/pause/start etc
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>";
         s += "<head><style>\r\ntable, th, td {\r\n border: 1px solid black;\r\n}</style></head>";
         s += "<body>\r\n";
@@ -417,20 +426,45 @@ int mdns1(int webtype)
           s += "</td></tr>";
         }
         s += "</table></body>";
+        if ( isset == "PAUSED" ) {
+           s += "<H2>Measurements are PAUSED</H2>";
+        }
         s += "</html>\r\n\r\n";
         Serial.println("Sending 200");
       }
       else if ( req.startsWith("/cleareeprom") ) {
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266";
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
+        s += postedID;
         s += "<p>Clearing the EEPROM<p>";
         s += "</html>\r\n\r\n";
         Serial.println("Sending 200");  
         Serial.println("clearing eeprom");
         for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
         EEPROM.commit();
+        delay(3000);
+        ESP.reset();
       }
       else if ( req.startsWith("/changedb") ) {
         // TODO: change DB code here
+      }
+      else if ( req.startsWith("/changeinterval") ) {
+        // TODO: change measurement interval - configure interval on startup
+      }
+      else if ( req.startsWith("/pause") ) {
+        isset = "PAUSED";
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
+        s += postedID;
+        s += "<p>Pausing Temp Measurements<p>";
+        s += "</html>\r\n\r\n";
+        Serial.println("Sending 200");  
+      }
+      else if ( req.startsWith("/start") ) {
+        isset = "SET";
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
+        s += postedID;
+        s += "<p>Starting Temp Measurements<p>";
+        s += "</html>\r\n\r\n";
+        Serial.println("Sending 200");  
       }
       else
       {
@@ -526,13 +560,18 @@ void setup ( void ) {
   Serial.print("PASS: ");
   Serial.println(epass);  
 
-  String influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
+  influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
   Serial.print("DB Host: ");
   Serial.println(influxdbhost);
 
-  String influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
+  influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
   Serial.print("DB Name: ");
   Serial.println(influxdbname);
+
+  isset = read_eeprom(EEPROM_SET_O,EEPROM_SET_S);
+  Serial.print("Set: ");
+  Serial.println(isset);
+
   
   if ( esid.length() > 1 ) 
   {
