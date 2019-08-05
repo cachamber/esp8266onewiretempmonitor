@@ -4,8 +4,9 @@ Chambeers temperature monitor
 
 */
 #include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
 #include <WiFiClient.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <InfluxDb.h>
 #include <WiFiUdp.h>
@@ -13,7 +14,18 @@ Chambeers temperature monitor
 
 //
 MDNSResponder mdns;
-WiFiServer server(80);
+ESP8266WebServer server(80);
+
+// Web Hook handlers
+void NotFound_page();
+// CONNECTED:
+void connected_status_page();
+void clear_eeprom_page();
+void pause_measurements_page();
+// AP:
+void configure_system_page();
+void handle_configure();
+
 String st;
 String wifi_choice="<select name=\"ssid\">";
 
@@ -151,6 +163,7 @@ int postToinfluxDB()
 
 // Start here
 void loop ( void ) {
+  server.handleClient();
   if ( isset == "SET") {
     if ((lastPost + postRate <= millis()) || lastPost == 0)
     {
@@ -190,56 +203,18 @@ void write_eeprom(int offset, String savestring) {
   }
 }
 
-// URL request parser
-// TODO: handle not found parameters
-String get_parameter( String param, String request )
-{
-  param.concat('=');
-  int paramLength = param.length();
-  int paramStart = request.indexOf(param);
-  int paramStop = request.indexOf('&', paramStart);
-
-  String myValue = request.substring(paramStart+paramLength, paramStop);
-
-  return(myValue);
-}
-
-
 int testWifi(void) {
   int c = 0;
   Serial.println("Waiting for Wifi to connect");  
   while ( c < 20 ) {
-    if (WiFi.status() == WL_CONNECTED) { return(20); } 
+    if (WiFi.status() == WL_CONNECTED) { return(WL_CONNECTED); } 
     delay(500);
-    Serial.print(WiFi.status());    
+    Serial.print(".");    
     c++;
   }
   Serial.println("Connect timed out, opening AP");
-  return(10);
+  return(WiFi.status());
 } 
-
-void launchWeb(int webtype) {
-          Serial.println("");
-          Serial.println("WiFi connected");
-          Serial.println(WiFi.localIP());
-          Serial.println(WiFi.softAPIP());
-          if (!mdns.begin("esp8266", WiFi.localIP())) {
-            Serial.println("Error setting up MDNS responder!");
-            while(1) { 
-              delay(1000);
-            }
-          }
-          Serial.println("mDNS responder started");
-          // Start the server
-          server.begin();
-          Serial.println("Server started");   
-          int b = 20;
-          int c = 0;
-          while(b == 20) { 
-               loop();   
-             b = mdns1(webtype);
-           }
-}
 
 void setupAP(void) {
   
@@ -296,196 +271,157 @@ void setupAP(void) {
   WiFi.softAP(postedID);
   Serial.println("softap");
   Serial.println("");
-  launchWeb(1);
-  Serial.println("over");
+ 
 }
 
-int mdns1(int webtype)
-{
-  // Check for any mDNS queries and send responses
-  mdns.update();
-  
-  // Check if a client has connected
-  WiFiClient client = server.available();
-  if (!client) {
-    return(20);
-  }
-  Serial.println("");
-  Serial.println("New client");
+/* =======================
+ *  Start Connected handlers
+ */
+void NotFound_page() {
+    // Send HTTP status 404 (Not Found) when there's no handler for the URI in the request
+    server.send(404, "text/plain", "404: Not found"); 
+}
 
-  // Wait for data from client to become available
-  while(client.connected() && !client.available()){
-    delay(1);
-   }
-  
-  // Read the first line of HTTP request
-  String req = client.readStringUntil('\r');
-  
-  // First line of HTTP request looks like "GET /path HTTP/1.1"
-  // Retrieve the "/path" part by finding the spaces
-  int addr_start = req.indexOf(' ');
-  int addr_end = req.indexOf(' ', addr_start + 1);
-  if (addr_start == -1 || addr_end == -1) {
-    Serial.print("Invalid request: ");
-    Serial.println(req);
-    return(20);
-   }
-  req = req.substring(addr_start + 1, addr_end);
-  Serial.print("Request: ");
-  Serial.println(req);
-  client.flush(); 
-  String s;
-  if ( webtype == 1 ) {
-      if (req == "/")
-      {
-        IPAddress ip = WiFi.softAPIP();
-        String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 at ";
-        s += ipStr;
-        s += "<p>";
-        s += st;
-        s += "<form method='get' action='a'>";
-        s += wifi_choice; 
-        s += "<p><label>Pass:</label><input name='pass' length=64><p>";
-        s += "<label>DB Host</label><input name='dbhost' length=64><p><label>DB Name</label><input name='dbname' length=64><input type='submit'></form>";
-        s += "</html>\r\n\r\n";
-        // TODO: Add new fields:
-        // Checkbox - Start measurements on boot - enabled by default
-        // text - postrate - Allow changes to frequency of measurements
-        Serial.println("Sending 200");
-      }
-      else if ( req.startsWith("/a?ssid=") ) {
-        // Set parameters in EEPROM
-        // /a?ssid=blahhhh&pass=poooo&dbhost=blah.com&dbname=blah
-        Serial.println("clearing eeprom");
-        for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
-        String qsid; 
-        qsid = get_parameter("ssid",req);
-        Serial.println(qsid);
-        Serial.println("");
-        String qpass = get_parameter("pass",req);
-        Serial.println(qpass);
-        Serial.println("");
-        String qdbhost = get_parameter("dbhost",req);
-        Serial.println(qdbhost);
-        Serial.println("");
-        String qdbname = get_parameter("dbname",req);
-        Serial.println(qdbname);
-        Serial.println("");
+void connected_status_page() {
+    String s;
+    GetTemps();
+   
+    s += "<head><style>\r\ntable, th, td {\r\n border: 1px solid black;\r\n}</style></head>";
+    s += "<body>\r\n";
+    s += "<p>";
+    s += "<table>";
+    s += "<tr><th colspan=\"2\">";
+    s += postedID;
+    s += "</th></tr>";
+    for (int i=0; i<MAX_DEVICES; i++)
+    {
+        s += "<tr><td>";
+        s += names[i];
+        s += "</td><td>";
+        s += measurements[i];
+        s += "</td></tr>";
+    }
+    s += "</table></body>";
+    if ( isset == "PAUSED" ) {
+        s += "<H2>Measurements are PAUSED</H2>";
+    }
+    server.send(200, "text/html", s); 
+}
+
+void clear_eeprom_page() {
+    String s;
+    s += "<h1>";
+    s += postedID;
+    s += "</h1>";
+    s += "<p>Clearing the EEPROM<p>";
+    server.send(200, "text/html", s);
+    
+    Serial.println("clearing eeprom");
+    for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
+    EEPROM.commit();
+    Serial.println("RESETTING");
+    delay(3000);
+    ESP.reset();
+}
+
+void pause_measurements_page() {
+      String s;
+
+      /* TODO: Add the following:
+       *     <head>
+                 <meta http-equiv="refresh" content="3;url=http://IP_ADDR/" />
+              </head>
+      */
+      isset = "PAUSED";
+      s = "Hello from ";
+      s += postedID;
+      s += "<p>Pausing Temp Measurements<p>";
+      server.send(200, "text/html", s);
+}
+
+void start_measurements_page() {
+    String s;   
+    // TODO: See pause - add redirect 
+    isset = "SET";
+    s = "Hello from ";
+    s += postedID;
+    s += "<p>Starting Temp Measurements<p>";
+    server.send(200, "text/html", s);
         
-        Serial.println("writing eeprom ssid:");
-        write_eeprom(EEPROM_SSID_O, qsid);
-        Serial.println("writing eeprom pass:");
-        write_eeprom(EEPROM_PASS_O, qpass);
-        Serial.println("writing eeprom dbhost:");
-        write_eeprom(EEPROM_DBH_O, qdbhost);
-        Serial.println("writing eeprom dbname:");
-        write_eeprom(EEPROM_DBN_O, qdbname);
-        Serial.println("writing eeprom isset:");
-        isset="SET";
-        write_eeprom(EEPROM_SET_O, isset);
-        isset="WAIT";
+}
+
+/* =======================
+ *  Start AP handlers
+ */
+void configure_system_page() {
+    String s;
+    // TODO: Add a configure password
+    IPAddress ip = WiFi.softAPIP();
+    String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+    s = "Hello from ESP8266 at ";
+    s += ipStr;
+    s += "<p>";
+    s += st;
+    s += "<form method='POST' action='/configure'>";
+    s += wifi_choice; 
+    s += "<p><label>Pass:</label><input name='pass' length=64><p>";
+    s += "<label>DB Host</label><input name='dbhost' length=64><p><label>DB Name</label><input name='dbname' length=64><input type='submit'></form>";
+    // TODO: Add new fields:
+    // Checkbox - Start measurements on boot - enabled by default
+    // text - postrate - Allow changes to frequency of measurements
+    server.send(200, "text/html", s); 
+}
+
+void handle_configure() {
+    String s;
+    Serial.println("handle_configure() here");
+    // Validate parameters are filled out
+    if( ! server.hasArg("ssid") || ! server.hasArg("pass") 
+        || ! server.hasArg("dbhost") || ! server.hasArg("dbname")
+        || server.arg("ssid") == NULL || server.arg("pass") == NULL 
+        || server.arg("dbhost") == NULL || server.arg("dbname") == NULL ) {
+          server.send(400, "text/plain", "400: Invalid Request");
+          return;
+        }
+    Serial.println("clearing eeprom");
+    for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
+    write_eeprom(EEPROM_SSID_O, server.arg("ssid"));
+    Serial.println("writing eeprom pass:");
+    write_eeprom(EEPROM_PASS_O, server.arg("pass"));
+    Serial.println("writing eeprom dbhost:");
+    write_eeprom(EEPROM_DBH_O, server.arg("dbhost"));
+    Serial.println("writing eeprom dbname:");
+    write_eeprom(EEPROM_DBN_O, server.arg("dbname"));
+    Serial.println("writing eeprom isset:");
+    isset="SET";
+    write_eeprom(EEPROM_SET_O, isset);
+    isset="WAIT";
           
-        EEPROM.commit();
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 ";
-        s += "Found ";
-        s += req;
-        s += "<p> saved to eeprom... reset will occur in 5 seconds to boot into new wifi</html>\r\n\r\n";
-        delay(5000);
-        ESP.reset();
-      }
-      else
-      {
-        s = "HTTP/1.1 404 Not Found\r\n\r\n";
-        Serial.println("Sending 404");
-      }
-  } 
-  // webtype != 1
-  else
-  {
-      // Status request - base url
-      if (req == "/")
-      {
-        GetTemps();
-        // TODO: Add a button to pause/start measurements
-        //       Add links to clearconfig/configuredb/pause/start etc
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>";
-        s += "<head><style>\r\ntable, th, td {\r\n border: 1px solid black;\r\n}</style></head>";
-        s += "<body>\r\n";
-        s += "<p>";
-        s += "<table>";
-        s += "<tr><th colspan=\"2\">";
-        s += postedID;
-        s += "</th></tr>";
-        for (int i=0; i<MAX_DEVICES; i++)
-        {
-          s += "<tr><td>";
-          s += names[i];
-          s += "</td><td>";
-          s += measurements[i];
-          s += "</td></tr>";
-        }
-        s += "</table></body>";
-        if ( isset == "PAUSED" ) {
-           s += "<H2>Measurements are PAUSED</H2>";
-        }
-        s += "</html>\r\n\r\n";
-        Serial.println("Sending 200");
-      }
-      else if ( req.startsWith("/cleareeprom") ) {
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
-        s += postedID;
-        s += "<p>Clearing the EEPROM<p>";
-        s += "</html>\r\n\r\n";
-        Serial.println("Sending 200");  
-        Serial.println("clearing eeprom");
-        for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
-        EEPROM.commit();
-        delay(3000);
-        ESP.reset();
-      }
-      else if ( req.startsWith("/changedb") ) {
-        // TODO: change DB code here
-      }
-      else if ( req.startsWith("/changeinterval") ) {
-        // TODO: change measurement interval - configure interval on startup
-      }
-      else if ( req.startsWith("/pause") ) {
-        isset = "PAUSED";
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
-        s += postedID;
-        s += "<p>Pausing Temp Measurements<p>";
-        s += "</html>\r\n\r\n";
-        Serial.println("Sending 200");  
-      }
-      else if ( req.startsWith("/start") ) {
-        isset = "SET";
-        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ";
-        s += postedID;
-        s += "<p>Starting Temp Measurements<p>";
-        s += "</html>\r\n\r\n";
-        Serial.println("Sending 200");  
-      }
-      else
-      {
-        s = "HTTP/1.1 404 Not Found\r\n\r\n";
-        Serial.println("Sending 404");
-      }       
-  }
-  client.print(s);
-  Serial.println("Done with client");
-  return(20);
+    EEPROM.commit();
+    s += "<h1>Configuration Saved:</h1>";
+    s += "<table>";
+    s += "<tr><td>SSID:</td><td>";
+    s += server.arg("ssid");
+    s += "</tr></td>";
+    s += "<tr><td>Password:</td><td>";
+    s += server.arg("pass");
+    s += "</tr></td>";
+    s += "<tr><td>DB Host:</td><td>";
+    s += server.arg("dbhost");
+    s += "</tr></td>";
+    s += "<tr><td>DB Name:</td><td>";
+    s += server.arg("dbname");
+    s += "</tr></td>";
+    s += "</table>";
+    s += "<h1>reset will occur in 5 seconds to boot into new wifi</h1>";
+    server.send(200, "text/html", s); 
+    delay(5000);
+    ESP.reset();
 }
 
 
-void setup ( void ) {
-  Serial.begin ( 115200 );
-  
-  // Start EEPROM
-  EEPROM.begin(512);
-  delay(10);
-  
-  init_values();
+
+void init_onewire ( void ) {
   
   // Start up the OneWire library
   sensors.begin(); 
@@ -540,47 +476,100 @@ void setup ( void ) {
       Serial.print(F(": "));
       Serial.println(names[i]);      
   }
+}
+
+
+void init_connected_handlers( void ) {
+    Serial.println("Setting up Status handlers");
+    // This is where the connected webserver pages go
+    server.on("/", HTTP_GET, connected_status_page);
+    server.on("/cleareeprom", HTTP_GET, clear_eeprom_page);
+    server.on("/pause", HTTP_GET, pause_measurements_page);
+    server.onNotFound(NotFound_page);
   
-  Serial.println(F("\n\nStarting Network..."));
-  // Set WiFi ID
-  uint8_t mac[WL_MAC_ADDR_LENGTH];
-  WiFi.macAddress(mac);
-  String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
-                 String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
-  macID.toUpperCase();
-  postedID = "ccESP8266-" + macID;
-  Serial.print("Setting PostedID to: ");
-  Serial.println(postedID);
-  // Read SSID/Password from EEPROM
-  String esid=read_eeprom(EEPROM_SSID_O,EEPROM_SSID_S);
-  Serial.print("SSID: ");
-  Serial.println(esid); 
+}
 
-  String epass=read_eeprom(EEPROM_PASS_O,EEPROM_PASS_S);
-  Serial.print("PASS: ");
-  Serial.println(epass);  
+void init_ap_handlers( void ) {
+    Serial.println("Setting up AP handlers");
+    // This is where the AP setup webserver pages go
+    server.on("/", HTTP_GET, configure_system_page);
+    server.on("/configure", HTTP_POST, handle_configure);
+    server.onNotFound(NotFound_page);
+}
 
-  influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
-  Serial.print("DB Host: ");
-  Serial.println(influxdbhost);
-
-  influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
-  Serial.print("DB Name: ");
-  Serial.println(influxdbname);
-
-  isset = read_eeprom(EEPROM_SET_O,EEPROM_SET_S);
-  Serial.print("Set: ");
-  Serial.println(isset);
-
-  
-  if ( esid.length() > 1 ) 
-  {
-    // test esid 
-      WiFi.begin(esid.c_str(), epass.c_str());
-      if ( testWifi() == 20 ) { 
-          launchWeb(0);
-          return;
+void setup_mdns() {
+    if (!mdns.begin("esp8266", WiFi.localIP())) {
+      Serial.println("Error setting up MDNS responder!");
+      while(1) { 
+              delay(1000);
       }
-  }
-  setupAP();
+    }
+}
+
+void setup ( void ) {
+    Serial.begin ( 115200 );
+  
+    // Start EEPROM
+    EEPROM.begin(512);
+    delay(10);
+  
+    init_values();
+    init_onewire();
+  
+    Serial.println(F("\n\nStarting Network..."));
+    // Set WiFi ID
+    uint8_t mac[WL_MAC_ADDR_LENGTH];
+    WiFi.macAddress(mac);
+    String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
+                   String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
+    macID.toUpperCase();
+    postedID = "ccESP8266-" + macID;
+    Serial.print("Setting PostedID to: ");
+    Serial.println(postedID);
+
+  
+    // Read SSID/Password from EEPROM
+    String esid=read_eeprom(EEPROM_SSID_O,EEPROM_SSID_S);
+    Serial.print("SSID: ");
+    Serial.println(esid); 
+
+    String epass=read_eeprom(EEPROM_PASS_O,EEPROM_PASS_S);
+    Serial.print("PASS: ");
+    Serial.println(epass);  
+
+    influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
+    Serial.print("DB Host: ");
+    Serial.println(influxdbhost);
+
+    influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
+    Serial.print("DB Name: ");
+    Serial.println(influxdbname);
+
+    isset = read_eeprom(EEPROM_SET_O,EEPROM_SET_S);
+    Serial.print("Set: ");
+    Serial.println(isset);
+  
+    // Check to see if we have an EEPROM configuration
+    if ( isset == "SET" )
+    {
+        Serial.println("EEPROM values are set");
+        // test esid 
+        WiFi.begin(esid.c_str(), epass.c_str());
+        if ( testWifi() == WL_CONNECTED ) { 
+            // Connected and initialized endpoints
+            Serial.println("WiFi connected");
+            Serial.println(WiFi.localIP());
+            setup_mdns();
+            init_connected_handlers();
+            server.begin();
+            return;
+        }
+    }
+    Serial.println("EEPROM values are not set/SSID misconfigured");
+    setupAP();
+    Serial.println("WiFi AP Started");
+    Serial.println(WiFi.softAPIP());
+    setup_mdns();
+    init_ap_handlers();
+    server.begin();
 }
