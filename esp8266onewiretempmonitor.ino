@@ -35,6 +35,17 @@ String wifi_choice="<select name=\"ssid\">";
 #define ONE_WIRE_BUS 13
 #define TEMPERATURE_PRECISION 12
 #define MAX_DEVICES 10
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+// Pass our oneWire reference to Dallas Temperature.
+DallasTemperature sensors(&oneWire);
+
+// Adafruit BME280 
+#include <Adafruit_BME280.h>
+#define BME280_I2C_ADDRESS  0x76
+#define SEALEVELPRESSURE_HPA (1011.52)
+Adafruit_BME280  bme;
+bool havebme280 = false;
 
 // EEPROM Layout end of possible configuration data
 // 0 SSID 32 PASS 96 DB Host 160 DB Name 224 Set 240
@@ -52,11 +63,6 @@ String wifi_choice="<select name=\"ssid\">";
 
 // Quick way to tell if DB parameters have been set
 String isset;
-
-// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(ONE_WIRE_BUS);
-// Pass our oneWire reference to Dallas Temperature.
-DallasTemperature sensors(&oneWire);
 
 // InfluxDB parameters
 // TODO: Auth?
@@ -89,9 +95,6 @@ void init_values()
   }
 }
 
-// Convert double to string
-char *dtostrf(double val, signed char width, unsigned char prec, char *s);
-
 // Takes a OneWire device address and converts it to a printable HEX String
 String convertDeviceAddress(DeviceAddress da)
 {   
@@ -108,13 +111,11 @@ String convertDeviceAddress(DeviceAddress da)
 // Tell all OneWire devices to retrieve temperatures
 void GetTemps()
 {
-
   sensors.requestTemperatures(); // Send the command to get temperatures
   for (int i=0; i<num_devices; i++)
   {
     measurements[i] = sensors.getTempFByIndex(i);
   }
- 
 }
 
 // Post measurements to influx
@@ -127,13 +128,13 @@ int postToinfluxDB()
   bool post = false;
   bool success = true;
   
-  // Get our current temps
+  // Get current temps
   GetTemps();
  
   // Batch up measurements 
   for (int i=0; i < num_devices; i++)
   {    
-      // Only send to influx valid sensors
+      // Only send valid sensor data to influx
       if ( names[i] != "NC" ) 
       {
          post = true;
@@ -155,10 +156,40 @@ int postToinfluxDB()
          influx.prepare(row);
       }
   }
+  if ( havebme280 )
+  {
+    // We haev a BME280 connected as well
+    InfluxData row("temperatures");
+    String sensor = postedID + "-BME280";
+ 
+    row.addTag("device", postedID);    
+    row.addTag("sensor", sensor);
+    row.addValue("temp", ((bme.readTemperature() * 1.8)+32) );
+    row.addValue("pressure", (bme.readPressure() / 100.0F));
+    row.addValue("humidity", (bme.readHumidity()));
+    influx.prepare(row);
+    post=true;
+  }
+  
   if ( post )
     success = influx.write();
 
   return (success); // Return success
+}
+
+bool check_for_bme280( void ) {
+    Wire.begin();
+    if (bme.begin(BME280_I2C_ADDRESS) == 0 )
+    {  // connection error or device address wrong!
+        Serial.println("Could not find a valid BME280 sensor, check wiring, address, sensor ID!");
+        Serial.print("SensorID was: 0x"); Serial.println(bme.sensorID(),16);
+        Serial.print("        ID of 0xFF probably means a bad address, a BMP 180 or BMP 085\n");
+        Serial.print("   ID of 0x56-0x58 represents a BMP 280,\n");
+        Serial.print("        ID of 0x60 represents a BME 280.\n");
+        Serial.print("        ID of 0x61 represents a BME 680.\n");
+        return(false);
+    }
+    return(true);
 }
 
 // Start here
@@ -173,7 +204,7 @@ void loop ( void ) {
       }
       else // If the post failed
       {
-        delay(5000); // Short delay, then try again
+        delay(500); // Short delay, then try again
         Serial.println(F("influxDB Post failed, will try again."));
       }
     }
@@ -197,9 +228,9 @@ void write_eeprom(int offset, String savestring) {
   {
      EEPROM.write(offset+i, savestring[i]);
      // TODO: Add debug statement
-     Serial.print("Wrote: ");
-     Serial.print(savestring[i]); 
-     Serial.println();
+     //Serial.print("Wrote: ");
+     //Serial.print(savestring[i]); 
+     //Serial.println();
   }
 }
 
@@ -515,6 +546,7 @@ void setup ( void ) {
   
     init_values();
     init_onewire();
+    havebme280 = check_for_bme280();
   
     Serial.println(F("\n\nStarting Network..."));
     // Set WiFi ID
