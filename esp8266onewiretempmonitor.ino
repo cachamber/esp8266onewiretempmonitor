@@ -3,6 +3,7 @@
 Chambeers temperature monitor
 
 */
+#include <FS.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266mDNS.h>
@@ -11,6 +12,9 @@ Chambeers temperature monitor
 #include <InfluxDb.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
+#include <DNSServer.h>
+#include <WiFiManager.h> 
+#include <ArduinoJson.h> 
 
 //
 MDNSResponder mdns;
@@ -63,11 +67,12 @@ bool havebme280 = false;
 
 // Quick way to tell if DB parameters have been set
 String isset;
-
 // InfluxDB parameters
-// TODO: Auth?
 String influxdbhost;
 String influxdbname;
+
+//flag for saving data
+bool shouldSaveConfig = false;
 
 // How often to post to influx
 const unsigned long postRate = 60000;
@@ -84,6 +89,12 @@ String names[MAX_DEVICES];
 // Detected number of devices - occurs at Power On/Reset only
 // TODO: endpoint to rescan the OneWire network
 int num_devices = 0;
+
+//callback notifying us of the need to save config
+void saveConfigCallback () {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
+}
 
 // Setup some base values
 void init_values()
@@ -384,6 +395,14 @@ void start_measurements_page() {
 /* =======================
  *  Start AP handlers
  */
+
+//gets called when WiFiManager enters configuration mode
+void configModeCallback (WiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+}
 void configure_system_page() {
     String s;
     // TODO: Add a configure password
@@ -415,20 +434,7 @@ void handle_configure() {
           return;
         }
     Serial.println("clearing eeprom");
-    for (int i = 0; i < EEPROM_SIZE; ++i) { EEPROM.write(i, 0); }
-    write_eeprom(EEPROM_SSID_O, server.arg("ssid"));
-    Serial.println("writing eeprom pass:");
-    write_eeprom(EEPROM_PASS_O, server.arg("pass"));
-    Serial.println("writing eeprom dbhost:");
-    write_eeprom(EEPROM_DBH_O, server.arg("dbhost"));
-    Serial.println("writing eeprom dbname:");
-    write_eeprom(EEPROM_DBN_O, server.arg("dbname"));
-    Serial.println("writing eeprom isset:");
-    isset="SET";
-    write_eeprom(EEPROM_SET_O, isset);
-    isset="WAIT";
-          
-    EEPROM.commit();
+   
     s += "<h1>Configuration Saved:</h1>";
     s += "<table>";
     s += "<tr><td>SSID:</td><td>";
@@ -539,15 +545,38 @@ void setup_mdns() {
 
 void setup ( void ) {
     Serial.begin ( 115200 );
-  
-    // Start EEPROM
-    EEPROM.begin(512);
-    delay(10);
-  
-    init_values();
-    init_onewire();
-    havebme280 = check_for_bme280();
-  
+    //read configuration from FS json
+    Serial.println("\n\nmounting FS...");
+    if (SPIFFS.begin()) {
+      Serial.println("mounted file system");
+      if (SPIFFS.exists("/config.json")) {
+        Serial.println("reading config file");
+        File configFile = SPIFFS.open("/config.json", "r");
+        if (configFile) {
+          Serial.println("opened config file");
+          size_t size = configFile.size();
+          // Allocate a buffer to store contents of the file.
+          std::unique_ptr<char[]> buf(new char[size]);
+          configFile.readBytes(buf.get(), size);
+          
+          DynamicJsonDocument json(size);
+          DeserializationError error = deserializeJson(json, buf.get());
+          serializeJsonPretty(json, Serial);
+          if (! error) {
+            Serial.println("\nparsed json");
+            const char* buffer = json["database_host"];
+            influxdbhost = String(buffer);
+            buffer = json["database_name"];
+            influxdbname = String(buffer);
+          } else {
+            Serial.println("failed to load json config");
+          }
+          configFile.close();
+        }
+      }
+    } else {
+      Serial.println("failed to mount FS");
+    }
     Serial.println(F("\n\nStarting Network..."));
     // Set WiFi ID
     uint8_t mac[WL_MAC_ADDR_LENGTH];
@@ -556,51 +585,51 @@ void setup ( void ) {
                    String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
     macID.toUpperCase();
     postedID = "ccESP8266-" + macID;
+    
+    WiFiManagerParameter custom_influxdb_host("db_host", "InfluxDB Host", "" , 64);
+    WiFiManagerParameter custom_influxdb_name("db_name", "InfluxDB Name", "", 64);
+    WiFiManager wifiManager;
+    //set config save notify callback
+    wifiManager.setSaveConfigCallback(saveConfigCallback);
+    wifiManager.addParameter(&custom_influxdb_host);
+    wifiManager.addParameter(&custom_influxdb_name);
+
+    if (!wifiManager.autoConnect(postedID.c_str(), "password")) {
+        Serial.println("failed to connect and hit timeout");
+        delay(3000);
+        //reset and try again, or maybe put it to deep sleep
+        ESP.reset();
+        delay(5000);
+     } 
+
+    influxdbhost = String( custom_influxdb_host.getValue());
+    influxdbname = String( custom_influxdb_name.getValue());
+
+    if(shouldSaveConfig) {
+       Serial.println("saving config");
+
+       DynamicJsonDocument json(4096);
+       json["database_host"] = influxdbhost;
+       json["database_name"] = influxdbname;
+       
+       File configFile = SPIFFS.open("/config.json", "w");
+       if (!configFile) {
+         Serial.println("failed to open config file for writing");
+       }
+       serializeJsonPretty(json, Serial);
+       serializeJson(json, configFile);
+       configFile.close();
+       //end save   
+    }
+
+    init_values();
+    init_onewire();
+    havebme280 = check_for_bme280();
+  
+
     Serial.print("Setting PostedID to: ");
     Serial.println(postedID);
-
-  
-    // Read SSID/Password from EEPROM
-    String esid=read_eeprom(EEPROM_SSID_O,EEPROM_SSID_S);
-    Serial.print("SSID: ");
-    Serial.println(esid); 
-
-    String epass=read_eeprom(EEPROM_PASS_O,EEPROM_PASS_S);
-    Serial.print("PASS: ");
-    Serial.println(epass);  
-
-    influxdbhost = read_eeprom(EEPROM_DBH_O,EEPROM_DBH_S);
-    Serial.print("DB Host: ");
-    Serial.println(influxdbhost);
-
-    influxdbname = read_eeprom(EEPROM_DBN_O,EEPROM_DBN_S);
-    Serial.print("DB Name: ");
-    Serial.println(influxdbname);
-
-    isset = read_eeprom(EEPROM_SET_O,EEPROM_SET_S);
-    Serial.print("Set: ");
-    Serial.println(isset);
-  
-    // Check to see if we have an EEPROM configuration
-    if ( isset == "SET" )
-    {
-        Serial.println("EEPROM values are set");
-        // test esid 
-        WiFi.begin(esid.c_str(), epass.c_str());
-        if ( testWifi() == WL_CONNECTED ) { 
-            // Connected and initialized endpoints
-            Serial.println("WiFi connected");
-            Serial.println(WiFi.localIP());
-            setup_mdns();
-            init_connected_handlers();
-            server.begin();
-            return;
-        }
-    }
-    Serial.println("EEPROM values are not set/SSID misconfigured");
-    setupAP();
-    Serial.println("WiFi AP Started");
-    Serial.println(WiFi.softAPIP());
+    
     setup_mdns();
     init_ap_handlers();
     server.begin();
